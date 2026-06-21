@@ -28,10 +28,10 @@ METRIC_EXPORT_INTERVAL_SECONDS = int(
     )
 )
 
-DQ_CAPTURE_SECONDS = float(
+PJSUA_COMMAND_TIMEOUT_SECONDS = float(
     os.getenv(
-        "DQ_CAPTURE_SECONDS",
-        "1.5"
+        "PJSUA_COMMAND_TIMEOUT_SECONDS",
+        "30"
     )
 )
 
@@ -121,11 +121,11 @@ lock = threading.RLock()
 
 pjsua_command_lock = threading.Lock()
 
-dq_lock = threading.Lock()
+pjsua_output_condition = threading.Condition()
 
-dq_output_lines = []
+pjsua_output_buffer = ""
 
-dq_capture_until = 0
+pjsua_waiting_for_prompt = False
 
 persistent_pjsua = None
 
@@ -265,12 +265,69 @@ def parse_rtp_stats(output):
     return updated
 
 # ============================================================
+# PJSUA COMMAND
+# ============================================================
+
+def run_pjsua_command(command, wait_for_prompt=False):
+
+    global pjsua_output_buffer
+    global pjsua_waiting_for_prompt
+
+    with pjsua_command_lock:
+
+        if wait_for_prompt:
+
+            with pjsua_output_condition:
+
+                pjsua_output_buffer = ""
+                pjsua_waiting_for_prompt = True
+
+        persistent_pjsua.stdin.write(
+            f"{command}\n"
+        )
+
+        persistent_pjsua.stdin.flush()
+
+        if not wait_for_prompt:
+
+            return ""
+
+        deadline = time.time() + PJSUA_COMMAND_TIMEOUT_SECONDS
+
+        with pjsua_output_condition:
+
+            while ">>>" not in pjsua_output_buffer:
+
+                remaining = deadline - time.time()
+
+                if remaining <= 0:
+
+                    pjsua_waiting_for_prompt = False
+
+                    raise TimeoutError(
+                        f"Timeout waiting for pjsua after '{command}'"
+                    )
+
+                pjsua_output_condition.wait(
+                    remaining
+                )
+
+            output = pjsua_output_buffer.split(
+                ">>>",
+                1
+            )[0]
+
+            pjsua_output_buffer = ""
+            pjsua_waiting_for_prompt = False
+
+            return output
+
+# ============================================================
 # REQUEST RTP STATS
 # ============================================================
 
 def request_rtp_stats():
 
-    global dq_capture_until
     global last_confirmed_time
 
     with lock:
@@ -279,24 +336,10 @@ def request_rtp_stats():
 
             return
 
-    with pjsua_command_lock:
-
-        with dq_lock:
-
-            dq_output_lines.clear()
-
-            dq_capture_until = time.time() + DQ_CAPTURE_SECONDS
-
-        persistent_pjsua.stdin.write("dq\n")
-        persistent_pjsua.stdin.flush()
-
-        time.sleep(DQ_CAPTURE_SECONDS)
-
-        with dq_lock:
-
-            output = "\n".join(dq_output_lines)
-
-            dq_capture_until = 0
+    output = run_pjsua_command(
+        "dq",
+        wait_for_prompt=True
+    )
 
     if not output:
 
@@ -418,25 +461,44 @@ def start_pjsua():
 def monitor_pjsua():
 
     global last_confirmed_time
+    global pjsua_output_buffer
+    global pjsua_waiting_for_prompt
 
-    for raw_line in persistent_pjsua.stdout:
+    line_buffer = ""
 
-        line = raw_line.strip()
+    while True:
+
+        char = persistent_pjsua.stdout.read(1)
+
+        if not char:
+
+            print("PJSUA output ended")
+
+            break
+
+        with pjsua_output_condition:
+
+            if pjsua_waiting_for_prompt:
+
+                pjsua_output_buffer += char
+
+            pjsua_output_condition.notify_all()
+
+        if char not in ("\n", "\r"):
+
+            line_buffer += char
+
+            continue
+
+        line = line_buffer.strip()
+
+        line_buffer = ""
 
         if not line:
+
             continue
 
         print(f"PJSUA: {line}")
-
-        with dq_lock:
-
-            if (
-                dq_capture_until > 0
-                and
-                time.time() <= dq_capture_until
-            ):
-
-                dq_output_lines.append(line)
 
         # ----------------------------------------------------
         # CALLING
@@ -589,18 +651,11 @@ def make_call(target: str):
 
     try:
 
-        with pjsua_command_lock:
+        run_pjsua_command("m")
 
-            persistent_pjsua.stdin.write("m\n")
-            persistent_pjsua.stdin.flush()
+        time.sleep(0.5)
 
-            time.sleep(0.5)
-
-            persistent_pjsua.stdin.write(
-                f"{sip_uri}\n"
-            )
-
-            persistent_pjsua.stdin.flush()
+        run_pjsua_command(sip_uri)
 
         print("CALL COMMAND SENT")
 
@@ -629,10 +684,7 @@ def hangup():
 
     try:
 
-        with pjsua_command_lock:
-
-            persistent_pjsua.stdin.write("h\n")
-            persistent_pjsua.stdin.flush()
+        run_pjsua_command("h")
 
         print("HANGUP SENT")
 
