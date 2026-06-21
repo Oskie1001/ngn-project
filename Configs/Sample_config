@@ -1,0 +1,15 @@
+--id sip:6001@192.168.40.10
+--registrar sip:192.168.40.10
+--realm *
+--username 6001
+--password 123
+
+--local-port=4000
+--ip-addr=192.168.110.10
+--bound-addr=192.168.110.10
+
+--auto-answer=200
+--play-file=/home/admin/pjproject-2.14.1/Front_Center.wav
+--null-audio
+--no-vad
+--no-tcp
