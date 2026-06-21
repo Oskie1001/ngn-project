@@ -127,6 +127,8 @@ pjsua_output_buffer = ""
 
 pjsua_waiting_for_prompt = False
 
+pjsua_recent_lines = []
+
 persistent_pjsua = None
 
 last_confirmed_time = 0
@@ -190,19 +192,19 @@ def parse_rtp_stats(output):
 
     updated = False
 
-    rx_match = re.search(
+    rx_matches = re.findall(
         r"RX.*?pkt loss=\d+\s+\(([\d\.]+)%\)",
         output,
         re.DOTALL
     )
 
-    tx_match = re.search(
+    tx_matches = re.findall(
         r"TX.*?pkt loss=\d+\s+\(([\d\.]+)%\)",
         output,
         re.DOTALL
     )
 
-    rtt_match = re.search(
+    rtt_matches = re.findall(
         r"RTT msec\s*:\s*([\d\.]+)",
         output
     )
@@ -214,48 +216,56 @@ def parse_rtp_stats(output):
 
     with lock:
 
-        if rx_match:
+        if rx_matches:
 
             rx_loss = float(
-                rx_match.group(1)
+                rx_matches[-1]
             )
 
             agent_state["rx_packet_loss_percent"] = rx_loss
             agent_state["packet_loss_percent"] = rx_loss
             updated = True
 
-        if tx_match:
+        if tx_matches:
 
             agent_state["tx_packet_loss_percent"] = float(
-                tx_match.group(1)
+                tx_matches[-1]
             )
 
             updated = True
 
-        if rtt_match:
+        if rtt_matches:
 
             agent_state["rtt_ms"] = float(
-                rtt_match.group(1)
+                rtt_matches[-1]
             )
 
             updated = True
 
-        if len(jitter_matches) >= 1:
+        if len(jitter_matches) >= 2:
 
             rx_jitter = float(
-                jitter_matches[0]
+                jitter_matches[-2]
             )
 
             agent_state["rx_jitter_ms"] = rx_jitter
             agent_state["jitter_ms"] = rx_jitter
             updated = True
 
-        if len(jitter_matches) >= 2:
-
             agent_state["tx_jitter_ms"] = float(
-                jitter_matches[1]
+                jitter_matches[-1]
             )
 
+            updated = True
+
+        elif len(jitter_matches) == 1:
+
+            rx_jitter = float(
+                jitter_matches[-1]
+            )
+
+            agent_state["rx_jitter_ms"] = rx_jitter
+            agent_state["jitter_ms"] = rx_jitter
             updated = True
 
     if updated:
@@ -263,6 +273,32 @@ def parse_rtp_stats(output):
         update_metrics()
 
     return updated
+
+# ============================================================
+# TRACK PJSUA RTP SUMMARY
+# ============================================================
+
+def track_pjsua_output_line(line):
+
+    global last_confirmed_time
+
+    pjsua_recent_lines.append(line)
+
+    if len(pjsua_recent_lines) > 30:
+
+        del pjsua_recent_lines[0]
+
+    if "RTT msec" not in line:
+
+        return
+
+    output = "\n".join(pjsua_recent_lines)
+
+    if parse_rtp_stats(output):
+
+        last_confirmed_time = time.time()
+
+        print("RTP stats updated from PJSUA output")
 
 # ============================================================
 # PJSUA COMMAND
@@ -395,20 +431,6 @@ def reset_call_state():
 
         agent_state["target"] = ""
 
-        agent_state["jitter_ms"] = 0.0
-
-        agent_state["packet_loss_percent"] = 0.0
-
-        agent_state["rx_jitter_ms"] = 0.0
-
-        agent_state["tx_jitter_ms"] = 0.0
-
-        agent_state["rx_packet_loss_percent"] = 0.0
-
-        agent_state["tx_packet_loss_percent"] = 0.0
-
-        agent_state["rtt_ms"] = 0.0
-
     update_metrics()
 
     print("STATE RESET -> IDLE")
@@ -499,6 +521,8 @@ def monitor_pjsua():
             continue
 
         print(f"PJSUA: {line}")
+
+        track_pjsua_output_line(line)
 
         # ----------------------------------------------------
         # CALLING
