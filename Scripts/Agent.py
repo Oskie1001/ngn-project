@@ -35,6 +35,13 @@ PJSUA_COMMAND_TIMEOUT_SECONDS = float(
     )
 )
 
+STALE_CONFIRMED_CALL_TIMEOUT_SECONDS = float(
+    os.getenv(
+        "STALE_CONFIRMED_CALL_TIMEOUT_SECONDS",
+        "120"
+    )
+)
+
 # ============================================================
 # PROMETHEUS METRICS
 # ============================================================
@@ -49,6 +56,12 @@ call_state_metric = Gauge(
     "voip_agent_call_state",
     "Current call state as a one-hot value",
     ["agent", "state"]
+)
+
+call_phase_active_metric = Gauge(
+    "voip_agent_call_phase_active",
+    "Whether a call phase has been triggered during the current call",
+    ["agent", "phase"]
 )
 
 jitter_metric = Gauge(
@@ -117,6 +130,17 @@ CALL_STATES = [
     "CONFIRMED"
 ]
 
+CALL_PHASES = [
+    "CALLING",
+    "RINGING",
+    "CONFIRMED"
+]
+
+call_phase_active = {
+    call_phase: 0
+    for call_phase in CALL_PHASES
+}
+
 lock = threading.RLock()
 
 pjsua_command_lock = threading.Lock()
@@ -154,6 +178,15 @@ def update_metrics():
                 1 if call_state == current_call_state else 0
             )
 
+        for call_phase in CALL_PHASES:
+
+            call_phase_active_metric.labels(
+                agent=AGENT_NAME,
+                phase=call_phase
+            ).set(
+                call_phase_active[call_phase]
+            )
+
         jitter_metric.labels(
             agent=AGENT_NAME
         ).set(agent_state["jitter_ms"])
@@ -181,6 +214,28 @@ def update_metrics():
         rtt_metric.labels(
             agent=AGENT_NAME
         ).set(agent_state["rtt_ms"])
+
+def mark_call_state(call_state, call_active=None):
+
+    global last_confirmed_time
+
+    with lock:
+
+        agent_state["call_state"] = call_state
+
+        if call_state in call_phase_active:
+
+            call_phase_active[call_state] = 1
+
+        if call_active is not None:
+
+            agent_state["call_active"] = call_active
+
+        if call_active == 1:
+
+            last_confirmed_time = time.time()
+
+    update_metrics()
 
 # ============================================================
 # PARSE RTP STATS
@@ -351,13 +406,14 @@ def request_rtp_stats():
     print(output)
     print("=====================\n")
 
+    last_confirmed_time = time.time()
+
     if parse_rtp_stats(output):
 
-        last_confirmed_time = time.time()
+        return
 
-    else:
+    print("No RTP stats matched in dq output")
 
-        print("No RTP stats matched in dq output")
 
 # ============================================================
 # PERIODIC METRIC EXPORT
@@ -408,6 +464,10 @@ def reset_call_state():
         agent_state["tx_packet_loss_percent"] = 0.0
 
         agent_state["rtt_ms"] = 0.0
+
+        for call_phase in CALL_PHASES:
+
+            call_phase_active[call_phase] = 0
 
     update_metrics()
 
@@ -500,50 +560,48 @@ def monitor_pjsua():
 
         print(f"PJSUA: {line}")
 
+        line_lower = line.lower()
+
         # ----------------------------------------------------
         # CALLING
         # ----------------------------------------------------
 
-        if "CALLING" in line:
+        if "calling" in line_lower:
 
-            with lock:
-                agent_state["call_state"] = "CALLING"
+            mark_call_state(
+                "CALLING"
+            )
 
         # ----------------------------------------------------
         # RINGING
         # ----------------------------------------------------
 
-        elif "EARLY" in line:
+        elif "early" in line_lower:
 
-            with lock:
-                agent_state["call_state"] = "RINGING"
+            mark_call_state(
+                "RINGING"
+            )
 
         # ----------------------------------------------------
         # INCOMING
         # ----------------------------------------------------
 
-        elif "Incoming call" in line:
+        elif "incoming call" in line_lower:
 
-            with lock:
-                agent_state["call_state"] = "RINGING"
+            mark_call_state(
+                "RINGING"
+            )
 
         # ----------------------------------------------------
         # CONFIRMED
         # ----------------------------------------------------
 
-        elif "CONFIRMED" in line:
+        elif "confirmed" in line_lower:
 
-            with lock:
-
-                agent_state["call_state"] = "CONFIRMED"
-
-                # IMPORTANT:
-                # NEVER increment
-                # ALWAYS binary
-
-                agent_state["call_active"] = 1
-
-            last_confirmed_time = time.time()
+            mark_call_state(
+                "CONFIRMED",
+                call_active=1
+            )
 
             print("CALL CONNECTED")
 
@@ -552,11 +610,11 @@ def monitor_pjsua():
         # ----------------------------------------------------
 
         elif (
-            "DISCONNECTED" in line
+            "disconnected" in line_lower
             or
-            "Call time:" in line
+            "call time:" in line_lower
             or
-            "deinitializing media" in line
+            "deinitializing media" in line_lower
         ):
 
             print("CALL DISCONNECTED")
@@ -581,8 +639,9 @@ def state_watchdog():
 
                 if (
                     agent_state["call_active"] == 1
-                    and
-                    time.time() - last_confirmed_time > 20
+                    and agent_state["call_state"] == "CONFIRMED"
+                    and time.time() - last_confirmed_time
+                    > STALE_CONFIRMED_CALL_TIMEOUT_SECONDS
                 ):
 
                     print("STALE CALL DETECTED")
