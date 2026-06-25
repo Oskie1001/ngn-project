@@ -1,6 +1,174 @@
 import random
 import time
+import os
 import requests
+from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+# ============================================================
+# METRICS
+# ============================================================
+
+CONTROLLER_METRICS_PORT = int(
+    os.getenv(
+        "CONTROLLER_METRICS_PORT",
+        "9300"
+    )
+)
+
+CALL_LABELS = [
+    "src_agent",
+    "dst_agent",
+    "src_number",
+    "dst_number",
+    "pair"
+]
+
+ROUTE_LABELS = [
+    "src_agent",
+    "dst_agent",
+    "pair"
+]
+
+controller_call_active = Gauge(
+    "voip_controller_call_active",
+    "Whether the controller currently has an active call session",
+    CALL_LABELS
+)
+
+controller_current_call_start_timestamp = Gauge(
+    "voip_controller_current_call_start_timestamp_seconds",
+    "Unix timestamp for the current active call start",
+    CALL_LABELS
+)
+
+controller_call_started_total = Counter(
+    "voip_controller_call_started_total",
+    "Total calls started by the controller",
+    ROUTE_LABELS
+)
+
+controller_call_completed_total = Counter(
+    "voip_controller_call_completed_total",
+    "Total calls completed by the controller",
+    ROUTE_LABELS
+)
+
+controller_call_failed_total = Counter(
+    "voip_controller_call_failed_total",
+    "Total call failures detected by the controller",
+    ROUTE_LABELS + ["reason"]
+)
+
+controller_call_duration_seconds = Histogram(
+    "voip_controller_call_duration_seconds",
+    "Planned call duration selected by the controller",
+    ROUTE_LABELS,
+    buckets=[
+        10,
+        20,
+        30,
+        45,
+        60,
+        90,
+        120
+    ]
+)
+
+controller_idle_duration_seconds = Histogram(
+    "voip_controller_idle_duration_seconds",
+    "Idle duration selected by the controller between calls",
+    buckets=[
+        5,
+        10,
+        15,
+        20,
+        30,
+        60
+    ]
+)
+
+controller_last_call_timestamp = Gauge(
+    "voip_controller_last_call_timestamp_seconds",
+    "Unix timestamp for the most recent call start",
+    ROUTE_LABELS
+)
+
+controller_selected_pair_total = Counter(
+    "voip_controller_selected_pair_total",
+    "Total times each traffic pair was selected before direction randomization",
+    ["pair"]
+)
+
+
+def route_pair(src_id, dst_id):
+
+    return f"{src_id}-{dst_id}"
+
+
+def metric_labels(src, dst, pair_label):
+
+    return {
+        "src_agent": src["name"],
+        "dst_agent": dst["name"],
+        "src_number": src["number"],
+        "dst_number": dst["number"],
+        "pair": pair_label
+    }
+
+
+def route_metric_labels(src, dst, pair_label):
+
+    return {
+        "src_agent": src["name"],
+        "dst_agent": dst["name"],
+        "pair": pair_label
+    }
+
+
+def set_call_active(labels, start_time):
+
+    controller_call_active.labels(**labels).set(1)
+    controller_current_call_start_timestamp.labels(**labels).set(start_time)
+
+
+def clear_call_active(labels):
+
+    controller_call_active.labels(**labels).set(0)
+    controller_current_call_start_timestamp.labels(**labels).set(0)
+
+
+def classify_call_response(response):
+
+    if response.status_code >= 400:
+
+        return "api_error"
+
+    try:
+
+        response_body = response.json()
+
+    except ValueError:
+
+        return None
+
+    status = response_body.get("status")
+
+    if status in (
+        "busy",
+        "already calling",
+        "error"
+    ):
+
+        return status.replace(" ", "_")
+
+    return None
+
+
+start_http_server(CONTROLLER_METRICS_PORT)
+
+print(
+    f"Controller Prometheus exporter running on :{CONTROLLER_METRICS_PORT}"
+)
 
 # ============================================================
 # AGENTS
@@ -17,12 +185,6 @@ agents = {
         "name": "Agent-B",
         "number": "6002",
         "api": "http://192.168.20.10:5001"
-    },
-
-    "C": {
-        "name": "Agent-C",
-        "number": "6003",
-        "api": "http://192.168.30.10:5001"
     }
 }
 
@@ -31,15 +193,11 @@ agents = {
 # ============================================================
 
 pairs = [
-    ("A", "B"),
-    ("B", "C"),
-    ("C", "A")
+    ("A", "B")
 ]
 
 weights = [
-    0.60,
-    0.25,
-    0.15
+    1.0
 ]
 
 # ============================================================
@@ -50,19 +208,32 @@ print("Central controller started")
 
 while True:
 
+    labels = None
+    route_labels = None
+    call_was_active = False
+
     try:
 
         # ------------------------------------
         # Choose pair
         # ------------------------------------
 
-        pair = random.choices(
+        selected_pair = random.choices(
             pairs,
             weights=weights,
             k=1
         )[0]
 
-        pair = list(pair)
+        selected_pair_label = route_pair(
+            selected_pair[0],
+            selected_pair[1]
+        )
+
+        controller_selected_pair_total.labels(
+            pair=selected_pair_label
+        ).inc()
+
+        pair = list(selected_pair)
 
         # ------------------------------------
         # Randomize call initiator
@@ -75,6 +246,23 @@ while True:
 
         src = agents[src_id]
         dst = agents[dst_id]
+
+        pair_label = route_pair(
+            src_id,
+            dst_id
+        )
+
+        labels = metric_labels(
+            src,
+            dst,
+            pair_label
+        )
+
+        route_labels = route_metric_labels(
+            src,
+            dst,
+            pair_label
+        )
 
         # ------------------------------------
         # Random duration
@@ -92,6 +280,14 @@ while True:
         idle_time = random.randint(
             5,
             20
+        )
+
+        controller_call_duration_seconds.labels(
+            **route_labels
+        ).observe(duration)
+
+        controller_idle_duration_seconds.observe(
+            idle_time
         )
 
         print("\n================================")
@@ -127,6 +323,36 @@ while True:
             response.text
         )
 
+        failure_reason = classify_call_response(
+            response
+        )
+
+        if failure_reason:
+
+            controller_call_failed_total.labels(
+                **route_labels,
+                reason=failure_reason
+            ).inc()
+
+        else:
+
+            call_start_time = time.time()
+
+            controller_call_started_total.labels(
+                **route_labels
+            ).inc()
+
+            controller_last_call_timestamp.labels(
+                **route_labels
+            ).set(call_start_time)
+
+            set_call_active(
+                labels,
+                call_start_time
+            )
+
+            call_was_active = True
+
         # ------------------------------------
         # Wait for call duration
         # ------------------------------------
@@ -153,12 +379,42 @@ while True:
                 hangup_response.status_code
             )
 
+            if call_was_active:
+
+                if hangup_response.status_code >= 400:
+
+                    controller_call_failed_total.labels(
+                        **route_labels,
+                        reason="hangup_api_error"
+                    ).inc()
+
+                else:
+
+                    controller_call_completed_total.labels(
+                        **route_labels
+                    ).inc()
+
         except Exception as e:
 
             print(
                 "Hangup failed:",
                 e
             )
+
+            if call_was_active:
+
+                controller_call_failed_total.labels(
+                    **route_labels,
+                    reason="hangup_exception"
+                ).inc()
+
+        finally:
+
+            if call_was_active:
+
+                clear_call_active(
+                    labels
+                )
 
         # ------------------------------------
         # Idle period
@@ -179,6 +435,19 @@ while True:
         break
 
     except Exception as e:
+
+        if route_labels:
+
+            controller_call_failed_total.labels(
+                **route_labels,
+                reason="exception"
+            ).inc()
+
+        if call_was_active and labels:
+
+            clear_call_active(
+                labels
+            )
 
         print(
             "\nERROR:",

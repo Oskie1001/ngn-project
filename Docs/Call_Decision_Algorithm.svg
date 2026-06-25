@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1600" viewBox="0 0 1600 1600">
+  <defs>
+    <style>
+      .bg { fill: #f7f8fb; }
+      .title { font: 700 44px Arial, Helvetica, sans-serif; fill: #172033; }
+      .subtitle { font: 400 22px Arial, Helvetica, sans-serif; fill: #5b6475; }
+      .box { fill: #ffffff; stroke: #2f5f8f; stroke-width: 3; rx: 18; }
+      .decision { fill: #fff7e6; stroke: #b7791f; stroke-width: 3; }
+      .action { fill: #eef7ff; stroke: #2f5f8f; stroke-width: 3; rx: 18; }
+      .wait { fill: #eefaf1; stroke: #32864b; stroke-width: 3; rx: 18; }
+      .error { fill: #fff0f0; stroke: #b83232; stroke-width: 3; rx: 18; }
+      .note { fill: #ffffff; stroke: #a7b0c0; stroke-width: 2; rx: 14; }
+      .text { font: 700 24px Arial, Helvetica, sans-serif; fill: #172033; }
+      .small { font: 400 19px Arial, Helvetica, sans-serif; fill: #30394a; }
+      .tiny { font: 400 16px Arial, Helvetica, sans-serif; fill: #5b6475; }
+      .arrow { stroke: #263246; stroke-width: 4; fill: none; marker-end: url(#arrowhead); }
+      .loop { stroke: #6b7280; stroke-width: 4; fill: none; marker-end: url(#arrowhead); stroke-dasharray: 10 8; }
+    </style>
+    <marker id="arrowhead" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#263246"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1600" height="1600"/>
+  <text class="title" x="800" y="70" text-anchor="middle">Call Decision Algorithm</text>
+  <text class="subtitle" x="800" y="106" text-anchor="middle">Based on Scripts/Agent_Controller.py</text>
+
+  <rect class="note" x="70" y="170" width="300" height="185"/>
+  <text class="text" x="220" y="212" text-anchor="middle">Agent Registry</text>
+  <text class="small" x="95" y="255">A: Agent-A, 6001</text>
+  <text class="small" x="95" y="287">B: Agent-B, 6002</text>
+  <text class="small" x="95" y="319">C: Agent-C, 6003</text>
+
+  <rect class="box" x="560" y="150" width="480" height="90"/>
+  <text class="text" x="800" y="187" text-anchor="middle">Start Controller Loop</text>
+  <text class="small" x="800" y="217" text-anchor="middle">Runs forever until KeyboardInterrupt</text>
+
+  <path class="arrow" d="M800 240 L800 290"/>
+
+  <polygon class="decision" points="800,290 1080,400 800,510 520,400"/>
+  <text class="text" x="800" y="374" text-anchor="middle">Choose Call Pair</text>
+  <text class="small" x="800" y="407" text-anchor="middle">random.choices(pairs, weights)</text>
+  <text class="tiny" x="800" y="438" text-anchor="middle">A-B 60%, B-C 25%, C-A 15%</text>
+
+  <path class="arrow" d="M800 510 L800 560"/>
+
+  <rect class="action" x="535" y="560" width="530" height="90"/>
+  <text class="text" x="800" y="597" text-anchor="middle">Randomize Direction</text>
+  <text class="small" x="800" y="627" text-anchor="middle">Shuffle selected pair, then set source and destination</text>
+
+  <path class="arrow" d="M800 650 L800 700"/>
+
+  <rect class="action" x="500" y="700" width="600" height="95"/>
+  <text class="text" x="800" y="738" text-anchor="middle">Generate Session Timing</text>
+  <text class="small" x="800" y="768" text-anchor="middle">duration = random 20-60s, idle = random 5-20s</text>
+
+  <path class="arrow" d="M800 795 L800 845"/>
+
+  <rect class="action" x="500" y="845" width="600" height="95"/>
+  <text class="text" x="800" y="883" text-anchor="middle">Trigger Call</text>
+  <text class="small" x="800" y="913" text-anchor="middle">POST source_api/call?target=destination_number</text>
+
+  <path class="arrow" d="M1100 892 L1190 892"/>
+
+  <rect class="error" x="1190" y="820" width="330" height="145"/>
+  <text class="text" x="1355" y="867" text-anchor="middle">On Error</text>
+  <text class="small" x="1355" y="898" text-anchor="middle">Print error message</text>
+  <text class="small" x="1355" y="929" text-anchor="middle">Wait 10s, then retry loop</text>
+
+  <path class="loop" d="M1355 820 C1355 610 1160 235 910 195"/>
+
+  <path class="arrow" d="M800 940 L800 990"/>
+
+  <rect class="wait" x="435" y="990" width="280" height="70"/>
+  <text class="text" x="575" y="1034" text-anchor="middle">Wait Duration</text>
+
+  <path class="arrow" d="M715 1025 L885 1025"/>
+
+  <rect class="action" x="885" y="990" width="280" height="70"/>
+  <text class="text" x="1025" y="1034" text-anchor="middle">POST /hangup</text>
+
+  <path class="arrow" d="M1165 1025 L1285 1025"/>
+
+  <rect class="wait" x="1285" y="990" width="240" height="70"/>
+  <text class="text" x="1405" y="1034" text-anchor="middle">Idle 5-20s</text>
+
+  <path class="loop" d="M1405 990 C1480 760 1290 170 1040 195"/>
+
+  <rect class="note" x="70" y="420" width="330" height="185"/>
+  <text class="text" x="235" y="462" text-anchor="middle">Important Behavior</text>
+  <text class="small" x="95" y="505">No quality-based routing</text>
+  <text class="small" x="95" y="537">No metric checks before calls</text>
+  <text class="small" x="95" y="569">Only weighted randomness</text>
+
+  <rect class="note" x="70" y="670" width="330" height="155"/>
+  <text class="text" x="235" y="712" text-anchor="middle">Output Logs</text>
+  <text class="small" x="95" y="755">Caller and receiver</text>
+  <text class="small" x="95" y="787">Duration and idle interval</text>
+</svg>
