@@ -24,7 +24,7 @@ ASTERISK_IP = "192.168.40.10"
 METRIC_EXPORT_INTERVAL_SECONDS = int(
     os.getenv(
         "METRIC_EXPORT_INTERVAL_SECONDS",
-        "5"
+        "2"
     )
 )
 
@@ -132,6 +132,51 @@ pjsua_recent_lines = []
 persistent_pjsua = None
 
 last_confirmed_time = 0
+
+# ============================================================
+# PJSUA PROCESS HEALTH
+# ============================================================
+
+def is_pjsua_running():
+
+    return (
+        persistent_pjsua is not None
+        and
+        persistent_pjsua.poll() is None
+        and
+        persistent_pjsua.stdin is not None
+        and
+        not persistent_pjsua.stdin.closed
+    )
+
+
+def restart_pjsua(reason):
+
+    global persistent_pjsua
+    global pjsua_output_buffer
+    global pjsua_waiting_for_prompt
+    global pjsua_recent_lines
+
+    print(f"Restarting PJSUA: {reason}")
+
+    old_pjsua = persistent_pjsua
+    persistent_pjsua = None
+
+    if old_pjsua is not None and old_pjsua.poll() is None:
+
+        old_pjsua.terminate()
+
+    with pjsua_output_condition:
+
+        pjsua_output_buffer = ""
+        pjsua_waiting_for_prompt = False
+        pjsua_output_condition.notify_all()
+
+    pjsua_recent_lines = []
+
+    reset_call_state()
+
+    start_pjsua()
 
 # ============================================================
 # METRIC UPDATE
@@ -311,6 +356,10 @@ def run_pjsua_command(command, wait_for_prompt=False):
 
     with pjsua_command_lock:
 
+        if not is_pjsua_running():
+
+            restart_pjsua("process is not running before command")
+
         if wait_for_prompt:
 
             with pjsua_output_condition:
@@ -318,11 +367,33 @@ def run_pjsua_command(command, wait_for_prompt=False):
                 pjsua_output_buffer = ""
                 pjsua_waiting_for_prompt = True
 
-        persistent_pjsua.stdin.write(
-            f"{command}\n"
-        )
+        try:
 
-        persistent_pjsua.stdin.flush()
+            persistent_pjsua.stdin.write(
+                f"{command}\n"
+            )
+
+            persistent_pjsua.stdin.flush()
+
+        except OSError as e:
+
+            if getattr(e, "errno", None) != 32:
+
+                raise
+
+            restart_pjsua("broken pipe while sending command")
+
+            if wait_for_prompt:
+
+                return ""
+
+            time.sleep(1)
+
+            persistent_pjsua.stdin.write(
+                f"{command}\n"
+            )
+
+            persistent_pjsua.stdin.flush()
 
         if not wait_for_prompt:
 
@@ -473,6 +544,7 @@ def start_pjsua():
 
     threading.Thread(
         target=monitor_pjsua,
+        args=(persistent_pjsua,),
         daemon=True
     ).start()
 
@@ -480,7 +552,7 @@ def start_pjsua():
 # MONITOR PJSUA OUTPUT
 # ============================================================
 
-def monitor_pjsua():
+def monitor_pjsua(pjsua_process):
 
     global last_confirmed_time
     global pjsua_output_buffer
@@ -490,7 +562,7 @@ def monitor_pjsua():
 
     while True:
 
-        char = persistent_pjsua.stdout.read(1)
+        char = pjsua_process.stdout.read(1)
 
         if not char:
 

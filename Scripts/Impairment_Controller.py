@@ -1,7 +1,10 @@
 from nicegui import ui
 from prometheus_client import Gauge, start_http_server
+import os
 import subprocess
 import sqlite3
+import threading
+import time
 from datetime import datetime
 
 # ============================================================
@@ -9,6 +12,20 @@ from datetime import datetime
 # ============================================================
 
 NETEM_INTERFACE = 'enp0s9'
+
+METRIC_EXPORT_PORT = int(
+    os.getenv(
+        'IMPAIRMENT_METRIC_EXPORT_PORT',
+        '9100'
+    )
+)
+
+METRIC_EXPORT_INTERVAL_SECONDS = float(
+    os.getenv(
+        'IMPAIRMENT_METRIC_EXPORT_INTERVAL_SECONDS',
+        '2'
+    )
+)
 
 # ============================================================
 # DATABASE
@@ -69,18 +86,21 @@ VLANS = {
         'delay': 0,
         'jitter': 0,
         'loss': 0,
+        'last_updated': 0,
     },
 
     '120': {
         'delay': 0,
         'jitter': 0,
         'loss': 0,
+        'last_updated': 0,
     },
 
     '130': {
         'delay': 0,
         'jitter': 0,
         'loss': 0,
+        'last_updated': 0,
     }
 }
 
@@ -91,6 +111,10 @@ VLANS = {
 metric_delay = None
 metric_jitter = None
 metric_loss = None
+metric_last_updated = None
+metric_last_exported = None
+
+vlan_lock = threading.RLock()
 
 # ============================================================
 # RUN COMMAND
@@ -122,24 +146,85 @@ def setup_metrics():
     global metric_delay
     global metric_jitter
     global metric_loss
+    global metric_last_updated
+    global metric_last_exported
 
     metric_delay = Gauge(
         'voip_impairment_delay_ms',
-        'Configured delay',
+        'Configured network impairment delay in milliseconds',
         ['vlan']
     )
 
     metric_jitter = Gauge(
         'voip_impairment_jitter_ms',
-        'Configured jitter',
+        'Configured network impairment jitter in milliseconds',
         ['vlan']
     )
 
     metric_loss = Gauge(
         'voip_impairment_packet_loss_percent',
-        'Configured packet loss',
+        'Configured network impairment packet loss percentage',
         ['vlan']
     )
+
+    metric_last_updated = Gauge(
+        'voip_impairment_last_update_timestamp_seconds',
+        'Unix timestamp of the last configured impairment update',
+        ['vlan']
+    )
+
+    metric_last_exported = Gauge(
+        'voip_impairment_last_export_timestamp_seconds',
+        'Unix timestamp of the last impairment metric export'
+    )
+
+    export_current_impairments()
+
+
+# ============================================================
+# METRIC UPDATE
+# ============================================================
+
+def export_current_impairments():
+
+    now = time.time()
+
+    with vlan_lock:
+
+        for vlan, params in VLANS.items():
+
+            metric_delay.labels(
+                vlan=vlan
+            ).set(params['delay'])
+
+            metric_jitter.labels(
+                vlan=vlan
+            ).set(params['jitter'])
+
+            metric_loss.labels(
+                vlan=vlan
+            ).set(params['loss'])
+
+            metric_last_updated.labels(
+                vlan=vlan
+            ).set(params['last_updated'])
+
+        metric_last_exported.set(now)
+
+
+def periodic_metric_exporter():
+
+    while True:
+
+        try:
+
+            export_current_impairments()
+
+        except Exception as e:
+
+            print(f'METRIC EXPORT ERROR: {e}')
+
+        time.sleep(METRIC_EXPORT_INTERVAL_SECONDS)
 
 # ============================================================
 # SHOW DEBUG
@@ -275,9 +360,11 @@ def initialize_tc():
 
 def apply_impairment(vlan):
 
-    delay = VLANS[vlan]['delay']
-    jitter = VLANS[vlan]['jitter']
-    loss = VLANS[vlan]['loss']
+    with vlan_lock:
+
+        delay = VLANS[vlan]['delay']
+        jitter = VLANS[vlan]['jitter']
+        loss = VLANS[vlan]['loss']
 
     parent = VLAN_MAP[vlan]['classid']
     handle = VLAN_MAP[vlan]['handle']
@@ -298,13 +385,7 @@ def apply_impairment(vlan):
 
     run(command)
 
-    # --------------------------------------------------------
-    # UPDATE PROMETHEUS
-    # --------------------------------------------------------
-
-    metric_delay.labels(vlan=vlan).set(delay)
-    metric_jitter.labels(vlan=vlan).set(jitter)
-    metric_loss.labels(vlan=vlan).set(loss)
+    export_current_impairments()
 
     # --------------------------------------------------------
     # SAVE HISTORY
@@ -431,9 +512,12 @@ def create_vlan_panel(vlan):
 
         def apply():
 
-            VLANS[vlan]['delay'] = delay_slider.value
-            VLANS[vlan]['jitter'] = jitter_slider.value
-            VLANS[vlan]['loss'] = loss_slider.value
+            with vlan_lock:
+
+                VLANS[vlan]['delay'] = delay_slider.value
+                VLANS[vlan]['jitter'] = jitter_slider.value
+                VLANS[vlan]['loss'] = loss_slider.value
+                VLANS[vlan]['last_updated'] = time.time()
 
             apply_impairment(vlan)
 
@@ -516,11 +600,18 @@ if __name__ == '__main__':
 
     initialize_tc()
 
-    start_http_server(9100)
+    start_http_server(METRIC_EXPORT_PORT)
+
+    threading.Thread(
+        target=periodic_metric_exporter,
+        daemon=True
+    ).start()
 
     print(
         '\n================================================\n'
-        'PROMETHEUS EXPORTER STARTED ON :9100\n'
+        f'PROMETHEUS EXPORTER STARTED ON :{METRIC_EXPORT_PORT}\n'
+        f'IMPAIRMENT METRICS REFRESH EVERY '
+        f'{METRIC_EXPORT_INTERVAL_SECONDS}s\n'
         'WEB UI STARTED ON :8080\n'
         '================================================\n'
     )
