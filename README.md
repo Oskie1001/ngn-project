@@ -1,4 +1,4 @@
-# NGN VoIP Testbed
+# Advanced Observability Frameworks for VoIP Networks
 
 This project is a small next-generation networking testbed for generating VoIP traffic, applying controlled network impairments, and exporting measurements for observability. It combines SIP call agents, a multi-agent call controller, Linux traffic-control impairment tooling, and Prometheus metrics so call quality can be tested under repeatable delay, jitter, and packet-loss conditions.
 
